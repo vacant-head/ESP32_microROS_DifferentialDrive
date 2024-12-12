@@ -1,7 +1,16 @@
 #include <Arduino.h>
 #include <PS4Controller.h>
+#include <micro_ros_platformio.h>
+#include <uxr/client/transport.h> // Add this line to include the transport header
+#include <geometry_msgs/msg/twist.h>
+#include <rmw_microros/rmw_microros.h>
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
 
 #define ESP_BT_MAC "a0:a3:b3:ab:dd:02"
+
+
 
 /*----------制御周期など----------*/
 #define CONTROL_PERIOD 1000                             // us
@@ -102,6 +111,35 @@ struct POSITION
 POSITION robotPos;
 POSITION worldPos;
 
+// micro-ROSのセットアップ
+rcl_subscription_t subscriber;
+geometry_msgs__msg__Twist msg;
+
+rclc_executor_t executor;// エグゼキュータの作成
+rclc_support_t support;
+rcl_allocator_t allocator;// アロケータの作成
+rcl_node_t node;// ノードの作成
+rcl_timer_t timer;// タイマーの作成
+
+// 速度指令値を受信するコールバック関数
+void subscription_callback(const void *msgin) {
+  const geometry_msgs__msg__Twist *msg = (const geometry_msgs__msg__Twist *)msgin;
+  float linear_x = msg->linear.x;
+  float linear_y = msg->linear.y;
+  float angular_z = msg->angular.z;
+
+  // 受信した速度指令値を処理する
+  // 例えば、受信した指令値に基づいてモーターの速度を設定する
+  linear_x = cmd_v_y;
+}
+
+// タイマーのコールバック関数
+void timer_callback(rcl_timer_t *timer, int64_t last_call_time) {
+  (void) last_call_time;
+  // タイマーのコールバック関数内でエグゼキュータをスピンする
+  rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+}
+
 void getPS4(float *y, float *yaw)
 {
   // PS4の値を正規化
@@ -128,6 +166,10 @@ void setup()
   Serial.begin(115200);
   while (!Serial)
     ;
+  set_microros_serial_transports(Serial);
+  delay(2000);
+
+
     PS4.begin("a0:a3:b3:ab:dd:02");
   // if ()
   // {
@@ -137,6 +179,21 @@ void setup()
   // {
   //   Serial.println("Could not connect to PS4 Controller");
   // }
+
+  // micro-ROSの初期化
+  allocator = rcl_get_default_allocator();
+  rclc_support_init(&support, 0, NULL, &allocator);
+
+  // ノードの作成
+  rclc_node_init_default(&node, "esp32_node", "", &support);
+
+  // サブスクライバの作成
+  rclc_subscription_init_default(&subscriber,&node,ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),"cmd_vel");
+  const unsigned int timer_timeout = 100;
+  rclc_timer_init_default(&timer,&support,RCL_MS_TO_NS(timer_timeout),timer_callback);
+
+  rclc_executor_init(&executor, &support.context, 1, &allocator);
+  rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA);
 
   ledcAttachPin(MOTOR_R_IN1, CH_1);
   ledcAttachPin(MOTOR_R_IN2, CH_2);
@@ -174,6 +231,8 @@ void setup()
 
 void loop()
 {
+  // エグゼキュータをスピンして、受信メッセージを処理する
+  rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
   // PS4
   if (PS4.isConnected())
   {
